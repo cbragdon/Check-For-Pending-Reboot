@@ -101,6 +101,40 @@ that has WinRM/PSRemoting rights on the target servers.
 
 ## FAQ
 
+### If multiple fixes/hotfixes are chained/queued for installation, does one reboot satisfy all of them?
+
+**Yes, generally one reboot clears the entire queue** — you don't need a
+separate reboot per KB. This is exactly why `PendingFileRenameOperations` and
+the CBS `RebootPending` state can (and often do) accumulate entries from
+several different patches at once: Windows doesn't process each update's
+file-swap/cleanup the moment it's installed if a reboot hasn't happened yet —
+it just keeps staging more entries onto the same queue. The next reboot walks
+the entire queue and finishes everything in it, regardless of how many
+separate updates contributed to it.
+
+This is also the underlying idea behind Microsoft's newer
+["One restart a month"](https://support.microsoft.com/en-us/servicing/os/windows/docs/2026/07/kb5121772-one-restart-a-month-for-windows-updates)
+behavior — Windows now deliberately holds driver, .NET, and firmware updates
+back and installs them together with the monthly security update so they all
+clear with a single restart, instead of prompting for a reboot after each one.
+
+**One important exception:** Servicing Stack Updates (SSUs). Microsoft
+recommends installing the latest SSU *before* installing a Latest Cumulative
+Update (LCU) — the SSU updates the component responsible for installing
+updates in the first place. If an SSU is involved, it can effectively need to
+be applied (and sometimes rebooted) ahead of the other updates in the chain
+rather than being satisfied by the same single reboot as everything else. See
+Microsoft's
+[Servicing Stack Updates (SSU): Frequently Asked Questions](https://support.microsoft.com/en-us/servicing/os/windows/2019/12/servicing-stack-updates-ssu-frequently-asked-questions)
+for details.
+
+**Practical takeaway for this script:** if `RebootPending_Overall` is flagged
+by multiple vectors at once (e.g., both `CBS_RebootPending` and
+`WUAU_RebootRequired`, or several `PendingFileRenameOperations_Detail`
+entries tied to different KBs per `RecentHotfixes`), you almost always only
+need to reboot the server **once** to clear all of them — you don't need to
+reboot once per detected vector or once per pending hotfix.
+
 ### Does a file marked for deletion affect system behavior before the reboot?
 
 **No meaningful change occurs until the reboot processes the delete** — the file
@@ -180,6 +214,7 @@ not a guaranteed match.
 - Microsoft Q&A — [Question regarding PendingFileRenameOperations caused by Microsoft Edge](https://learn.microsoft.com/en-gb/answers/questions/5981763/question-regarding-pendingfilerenameoperations-cau)
 - Ivanti — [Troubleshoot Persistent PendingFileRenameOperations In Registry](https://hub.ivanti.com/s/article/Troubleshoot-Persistent-PendingFileRenameOperations-In-Registry)
 - Revenera — [PendingFileRenameOperations Versus MsiSystemRebootPending](https://community.revenera.com/s/article/pendingfilerenameoperations-versus-msisystemrebootpending)
+- Microsoft Support — [Servicing Stack Updates (SSU): Frequently Asked Questions](https://support.microsoft.com/en-us/servicing/os/windows/2019/12/servicing-stack-updates-ssu-frequently-asked-questions)
 
 ## License
 
