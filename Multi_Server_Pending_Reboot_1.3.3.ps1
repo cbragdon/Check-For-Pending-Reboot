@@ -76,6 +76,16 @@
 #                         logic itself. Write-PendingRebootSummary rewritten
 #                         to compute columns dynamically; Export/Email
 #                         column lists and the legend updated to match.
+#   1.6.1 - 2026-09-27 - Fixed Write-PendingRebootSummary: rows are now built
+#                         as a single Write-Host call per server instead of
+#                         many small -NoNewline segments. PowerShell ISE's
+#                         Start-Transcript logs each -NoNewline call on its
+#                         own line, which garbled the summary table in saved
+#                         transcripts (confirmed via real test run). Rows are
+#                         now colored by overall severity (red = pending,
+#                         magenta = connection error, gray = clean) instead of
+#                         per-cell, trading granular cell color for reliable
+#                         rendering across all hosts/logging methods.
 #==============================================================================
 
 function Test-PendingReboot {
@@ -459,11 +469,6 @@ function Write-PendingRebootSummary {
         [object[]]$Results
     )
 
-    function _Flag($value) {
-        if ($value) { return @{Text = 'YES'; Color = 'Red'} }
-        else         { return @{Text = 'no';  Color = 'DarkGray'} }
-    }
-
     # Name = property on the result object, Header = column title, Flag = colorize as YES/no
     $columns = @(
         @{Name = 'ComputerName';                       Header = 'ComputerName'; Flag = $false}
@@ -494,18 +499,28 @@ function Write-PendingRebootSummary {
     Write-Host ('-' * $headerLine.Length) -ForegroundColor DarkGray
 
     foreach ($r in $Results) {
-        foreach ($col in $columns) {
+        # Build the entire row as one string and issue a single Write-Host call.
+        # (Using many small -NoNewline segments renders correctly live in a normal
+        # console, but PowerShell ISE's Start-Transcript logs each -NoNewline call
+        # on its own line, garbling the table in the saved transcript. A single
+        # call per row avoids that regardless of host.)
+        $cells = foreach ($col in $columns) {
             $value = $r.($col.Name)
             if ($col.Flag) {
-                $flag = _Flag $value
-                Write-Host ("{0,-$($col.Width)}" -f $flag.Text) -NoNewline -ForegroundColor $flag.Color
+                $text = if ($value) { 'YES' } else { 'no' }
             }
             else {
-                Write-Host ("{0,-$($col.Width)}" -f "$value") -NoNewline -ForegroundColor White
+                $text = "$value"
             }
-            Write-Host "  " -NoNewline
+            "{0,-$($col.Width)}" -f $text
         }
-        Write-Host ""
+        $rowLine = $cells -join '  '
+
+        $rowColor = if ($r.ConnectionError)            { 'Magenta' }
+                    elseif ($r.RebootPending_Overall)   { 'Red' }
+                    else                                { 'DarkGray' }
+
+        Write-Host $rowLine -ForegroundColor $rowColor
 
         if ($r.ConnectionError) {
             Write-Host ("   >> Connection/execution error — see warnings above." ) -ForegroundColor Magenta
