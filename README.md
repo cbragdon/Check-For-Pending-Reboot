@@ -56,6 +56,8 @@ purely for reporting context (`OSCaption`, `OSVersion`, `OSBuildNumber`).
 | `CCM_RebootPending_WMI` | `root\ccm\clientsdk:CCM_ClientUtilities` (if SCCM/MECM client installed) | SCCM client has signaled a reboot is required. |
 | `RebootPending_Overall` | — | `$true` if any vector above is flagged. |
 | `RecentHotfixes` | `Get-HotFix` (only populated when PFRO is flagged) | Best-effort list of the 5 most recently installed hotfixes/CUs, as candidate causes for the pending file operations — a timing correlation, **not** a guaranteed package link. |
+| `LastBootUpTime` | `Win32_OperatingSystem` | The server's last boot time — used to determine whether a pending reboot is new or leftover (see [FAQ](#faq-why-does-the-server-still-show-a-pending-reboot-right-after-i-already-rebooted-it) below). |
+| `CBSLogLastWriteTime` / `CBSLogNewerThanBoot` | `C:\Windows\Logs\CBS\CBS.log` (file metadata) | Last-write time of CBS.log, and whether that's newer than `LastBootUpTime`. Distinguishes a fresh post-reboot pending state from a stale/leftover one that a reboot alone won't clear. |
 
 ### When a server can't be reached
 
@@ -64,7 +66,8 @@ If a server can't be connected to after retries, `ConnectionError` is set to
 case every detection field above (`RebootPending_Overall`, `CBS_*`,
 `WUAU_RebootRequired`, `PendingFileRenameOperations_Exist`/`_Detail`,
 `RecentHotfixes`, `PendingComputerRename`, `PendingDomainJoin`,
-`CCM_RebootPending_WMI`) is set to the string `"N/A"` rather than `$false`, and
+`CCM_RebootPending_WMI`, `LastBootUpTime`, `CBSLogLastWriteTime`,
+`CBSLogNewerThanBoot`) is set to the string `"N/A"` rather than `$false`, and
 `OSCaption`/`OSVersion`/`OSBuildNumber` are set to `"Unknown"` — so a failed
 connection is never visually mistaken for a clean/false result. Failed
 connections are also always listed in a dedicated "CONNECTION FAILURES"
@@ -134,6 +137,36 @@ by multiple vectors at once (e.g., both `CBS_RebootPending` and
 entries tied to different KBs per `RecentHotfixes`), you almost always only
 need to reboot the server **once** to clear all of them — you don't need to
 reboot once per detected vector or once per pending hotfix.
+
+### Why does the server still show a pending reboot right after I already rebooted it?
+
+This almost always means one of two very different things happened, and
+telling them apart matters:
+
+1. **Something new got staged after the reboot completed.** If Windows
+   Update/WSUS/SCCM is configured to run its detection-and-install cycle at
+   startup, it can install another update within seconds or minutes of the
+   reboot finishing — so what you're seeing is a *brand-new* pending state,
+   not the old one failing to clear. Multi-stage servicing (large CUs,
+   feature updates, .NET stacking) can also legitimately require two reboots
+   in a row ("Configuring updates... X%"). An AV/EDR agent, backup agent, or
+   the SCCM client itself can independently stage a rename/delete/reboot flag
+   too.
+2. **The servicing stack never actually cleared its own state.** Occasionally
+   CBS fails to clear `RebootPending` due to a failed or interrupted
+   servicing operation. Rebooting again won't fix this on its own — it needs
+   `DISM /Online /Cleanup-Image /RestoreHealth` followed by `sfc /scannow`.
+
+**The script checks this for you.** Every result now includes `LastBootUpTime`
+(from `Win32_OperatingSystem`) and `CBSLogLastWriteTime` (the last-write
+timestamp of `C:\Windows\Logs\CBS\CBS.log`). For any server still flagged with
+`RebootPending_Overall = True`, `Write-PendingRebootActivityCheck` compares the
+two and tells you which situation you're in:
+
+- **CBS.log activity is newer than the last boot** → new post-reboot activity
+  (case 1 above) — expected, not a bug. Reboot again once it settles.
+- **CBS.log activity predates the last boot** → stale/leftover state (case 2
+  above) — a reboot alone won't fix it; run DISM/SFC on that server.
 
 ### Does a file marked for deletion affect system behavior before the reboot?
 

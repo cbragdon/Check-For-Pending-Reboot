@@ -23,6 +23,7 @@
 # Functions:
 #   Test-PendingReboot          - Core detection logic (pipeline-aware)
 #   Write-PendingFileOperations - Tabular output of filtered file operations
+#   Write-PendingRebootActivityCheck - CBS.log vs. last-boot-time comparison
 #   Write-PendingRebootLegend   - Definitions footer (printed once, no params)
 #
 # Change Log:
@@ -109,6 +110,18 @@
 #                         display, email flagged count) now explicitly compare
 #                         "-eq $true" so the "N/A" placeholder string is never
 #                         mistaken for a flagged/true result.
+#   1.8.0 - 2026-09-27 - Added LastBootUpTime, CBSLogLastWriteTime, and
+#                         CBSLogNewerThanBoot to Test-PendingReboot: compares
+#                         C:\Windows\Logs\CBS\CBS.log's last-write time against
+#                         the server's last boot time so a server that still
+#                         shows a pending reboot right after rebooting can be
+#                         told apart as either new post-reboot activity (a
+#                         fresh update/agent/rename op staged afterward) or a
+#                         stale/leftover CBS state that a reboot alone won't
+#                         clear (needs DISM /RestoreHealth + sfc /scannow).
+#                         Added Write-PendingRebootActivityCheck to surface
+#                         this comparison for every flagged server. Added a
+#                         matching FAQ entry to README.md.
 #==============================================================================
 
 function Test-PendingReboot {
@@ -147,6 +160,9 @@ function Test-PendingReboot {
                         OSCaption                           = $null
                         OSVersion                           = $null
                         OSBuildNumber                       = $null
+                        LastBootUpTime                      = $null
+                        CBSLogLastWriteTime                 = $null
+                        CBSLogNewerThanBoot                 = $null
                         CBS_RebootPending                  = $false
                         CBS_PackagesPending                = $false
                         CBS_RebootInProgress               = $false
@@ -166,9 +182,24 @@ function Test-PendingReboot {
                     # for detection logic itself — this is captured for reporting/context.
                     try {
                         $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
-                        $result.OSCaption     = $os.Caption
-                        $result.OSVersion     = $os.Version
-                        $result.OSBuildNumber = $os.BuildNumber
+                        $result.OSCaption      = $os.Caption
+                        $result.OSVersion      = $os.Version
+                        $result.OSBuildNumber  = $os.BuildNumber
+                        $result.LastBootUpTime = $os.LastBootUpTime
+                    } catch {}
+
+                    # CBS.log activity vs. last boot time — a server can still show a pending
+                    # reboot right after rebooting for two very different reasons: (a) something
+                    # staged a *new* update/operation after the reboot completed, or (b) the
+                    # servicing stack never actually cleared its own state and further reboots
+                    # alone won't fix it. Comparing CBS.log's last-write time to LastBootUpTime
+                    # tells the two apart without having to open/parse the log itself.
+                    try {
+                        $cbsLog = Get-Item 'C:\Windows\Logs\CBS\CBS.log' -ErrorAction Stop
+                        $result.CBSLogLastWriteTime = $cbsLog.LastWriteTime
+                        if ($result.LastBootUpTime) {
+                            $result.CBSLogNewerThanBoot = ($cbsLog.LastWriteTime -gt $result.LastBootUpTime)
+                        }
                     } catch {}
 
                     # Check 1: Component Based Servicing (CBS) — reboot pending
@@ -329,6 +360,9 @@ function Test-PendingReboot {
                     OSCaption                           = 'Unknown'
                     OSVersion                           = 'Unknown'
                     OSBuildNumber                       = 'Unknown'
+                    LastBootUpTime                      = 'N/A'
+                    CBSLogLastWriteTime                 = 'N/A'
+                    CBSLogNewerThanBoot                 = 'N/A'
                     RebootPending_Overall              = 'N/A'
                     CBS_RebootPending                  = 'N/A'
                     CBS_PackagesPending                = 'N/A'
@@ -374,6 +408,61 @@ function Write-PendingFileOperations {
             Write-Host "   For a definitive link, grep C:\Windows\Logs\CBS\CBS.log on $($server.ComputerName) for the file name above." -ForegroundColor DarkGray
         }
     }
+}
+
+
+function Write-PendingRebootActivityCheck {
+    <#
+        For servers currently flagged with a pending reboot, compares
+        C:\Windows\Logs\CBS\CBS.log's last-write time against the server's
+        last boot time (LastBootUpTime). This answers the common follow-up
+        question "why am I still seeing a pending reboot right after rebooting?":
+
+          - CBS.log activity is NEWER than the last boot -> something (Windows
+            Update/WSUS/SCCM, an agent installer, a rename/domain-join op)
+            staged a fresh pending-reboot condition *after* the reboot
+            completed. This is a new state, not a leftover — expected, not a bug.
+
+          - CBS.log activity is OLDER than (or equal to) the last boot -> the
+            servicing stack never actually cleared its own RebootPending state
+            during that reboot. Further reboots alone likely won't resolve it;
+            investigate with 'DISM /Online /Cleanup-Image /RestoreHealth' and
+            'sfc /scannow' on the target server.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [object[]]$Results
+    )
+
+    $flagged = $Results | Where-Object {
+        $_.RebootPending_Overall -eq $true -and $_.CBSLogNewerThanBoot -is [bool]
+    }
+    if (-not $flagged) { return }
+
+    Write-Host ""
+    Write-Host "─────────────────────────────────────────────────────────────────" -ForegroundColor DarkGray
+    Write-Host "CBS.LOG ACTIVITY vs. LAST BOOT TIME" -ForegroundColor White
+    Write-Host "─────────────────────────────────────────────────────────────────" -ForegroundColor DarkGray
+
+    foreach ($server in $flagged) {
+        Write-Host ""
+        Write-Host "[$($server.ComputerName)]" -ForegroundColor Cyan
+        Write-Host "   Last boot time        : $($server.LastBootUpTime)" -ForegroundColor Yellow
+        Write-Host "   CBS.log last activity : $($server.CBSLogLastWriteTime)" -ForegroundColor Yellow
+
+        if ($server.CBSLogNewerThanBoot) {
+            Write-Host "   >> CBS.log activity is NEWER than the last boot — this looks like a" -ForegroundColor DarkYellow
+            Write-Host "      fresh pending-reboot condition staged after the reboot completed" -ForegroundColor DarkYellow
+            Write-Host "      (new update/agent/rename op), not a leftover from before it." -ForegroundColor DarkYellow
+        }
+        else {
+            Write-Host "   >> CBS.log activity PREDATES the last boot — the servicing stack" -ForegroundColor Red
+            Write-Host "      never actually cleared its RebootPending state. Another reboot" -ForegroundColor Red
+            Write-Host "      alone likely won't resolve this — investigate with" -ForegroundColor Red
+            Write-Host "      'DISM /Online /Cleanup-Image /RestoreHealth' and 'sfc /scannow'." -ForegroundColor Red
+        }
+    }
+    Write-Host ""
 }
 
 
@@ -615,6 +704,9 @@ function Export-PendingRebootReport {
                                      OSCaption,
                                      OSVersion,
                                      OSBuildNumber,
+                                     LastBootUpTime,
+                                     CBSLogLastWriteTime,
+                                     CBSLogNewerThanBoot,
                                      RebootPending_Overall,
                                      CBS_RebootPending,
                                      CBS_PackagesPending,
@@ -677,6 +769,9 @@ function Send-PendingRebootEmail {
                                      OSCaption,
                                      OSVersion,
                                      OSBuildNumber,
+                                     LastBootUpTime,
+                                     CBSLogLastWriteTime,
+                                     CBSLogNewerThanBoot,
                                      RebootPending_Overall,
                                      CBS_RebootPending,
                                      CBS_PackagesPending,
@@ -785,6 +880,11 @@ Write-PendingRebootConnectionFailures -Results $results
 if ($ShowPendingFiles -eq 1) {
     Write-PendingFileOperations -Results $results
 }
+
+# CBS.log activity vs. last boot time — helps explain "still pending right
+# after a reboot" by telling new post-reboot activity apart from a stale/
+# leftover servicing state. Shown for any currently-flagged server.
+Write-PendingRebootActivityCheck -Results $results
 
 # Export to CSV/HTML
 $exportedPaths = $null
