@@ -57,6 +57,19 @@ purely for reporting context (`OSCaption`, `OSVersion`, `OSBuildNumber`).
 | `RebootPending_Overall` | — | `$true` if any vector above is flagged. |
 | `RecentHotfixes` | `Get-HotFix` (only populated when PFRO is flagged) | Best-effort list of the 5 most recently installed hotfixes/CUs, as candidate causes for the pending file operations — a timing correlation, **not** a guaranteed package link. |
 
+### When a server can't be reached
+
+If a server can't be connected to after retries, `ConnectionError` is set to
+`$true` and `ConnectionErrorMessage` captures the actual error text. In that
+case every detection field above (`RebootPending_Overall`, `CBS_*`,
+`WUAU_RebootRequired`, `PendingFileRenameOperations_Exist`/`_Detail`,
+`RecentHotfixes`, `PendingComputerRename`, `PendingDomainJoin`,
+`CCM_RebootPending_WMI`) is set to the string `"N/A"` rather than `$false`, and
+`OSCaption`/`OSVersion`/`OSBuildNumber` are set to `"Unknown"` — so a failed
+connection is never visually mistaken for a clean/false result. Failed
+connections are also always listed in a dedicated "CONNECTION FAILURES"
+section printed after the summary table.
+
 ## Usage
 
 Configuration lives in the `USAGE` section at the bottom of the script:

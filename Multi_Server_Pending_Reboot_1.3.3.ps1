@@ -86,6 +86,29 @@
 #                         magenta = connection error, gray = clean) instead of
 #                         per-cell, trading granular cell color for reliable
 #                         rendering across all hosts/logging methods.
+#   1.7.0 - 2026-09-27 - Connection-failure rows now use explicit "N/A"
+#                         (instead of False/$null) for every detection field
+#                         (RebootPending_Overall, CBS_*, WUAU_RebootRequired,
+#                         PendingFileRenameOperations_Exist/_Detail,
+#                         RecentHotfixes, PendingComputerRename,
+#                         PendingDomainJoin, CCM_RebootPending_WMI) and
+#                         "Unknown" for OSCaption/OSVersion/OSBuildNumber, so
+#                         a failed connection is never visually confused with
+#                         a clean/False result. Added ConnectionErrorMessage
+#                         field capturing the actual error text. Added
+#                         Write-PendingRebootConnectionFailures — an always-
+#                         visible, Write-Host-based report of servers that
+#                         could not be reached, called automatically after
+#                         the summary table. This replaces reliance on
+#                         Write-Warning, whose output was not being captured
+#                         by Start-Transcript in PowerShell ISE, so failed
+#                         connections previously went unreported in saved
+#                         transcripts. All truthiness checks against
+#                         RebootPending_Overall/PendingFileRenameOperations_Exist
+#                         (legend trigger, $OnlyShowFlagged filter, file-ops
+#                         display, email flagged count) now explicitly compare
+#                         "-eq $true" so the "N/A" placeholder string is never
+#                         mistaken for a flagged/true result.
 #==============================================================================
 
 function Test-PendingReboot {
@@ -119,6 +142,8 @@ function Test-PendingReboot {
                 try {
                     $scriptBlock = {
                     $result = [PSCustomObject]@{
+                        ConnectionError                     = $false
+                        ConnectionErrorMessage              = $null
                         OSCaption                           = $null
                         OSVersion                           = $null
                         OSBuildNumber                       = $null
@@ -300,20 +325,21 @@ function Test-PendingReboot {
                 [PSCustomObject]@{
                     ComputerName                       = $Computer
                     ConnectionError                    = $true
-                    OSCaption                           = $null
-                    OSVersion                           = $null
-                    OSBuildNumber                       = $null
-                    RebootPending_Overall              = $false
-                    CBS_RebootPending                  = $false
-                    CBS_PackagesPending                = $false
-                    CBS_RebootInProgress               = $false
-                    WUAU_RebootRequired                = $false
-                    PendingFileRenameOperations_Exist  = $false
-                    PendingFileRenameOperations_Detail = $null
-                    RecentHotfixes                     = $null
-                    PendingComputerRename              = $false
-                    PendingDomainJoin                  = $false
-                    CCM_RebootPending_WMI              = $false
+                    ConnectionErrorMessage             = "$lastError"
+                    OSCaption                           = 'Unknown'
+                    OSVersion                           = 'Unknown'
+                    OSBuildNumber                       = 'Unknown'
+                    RebootPending_Overall              = 'N/A'
+                    CBS_RebootPending                  = 'N/A'
+                    CBS_PackagesPending                = 'N/A'
+                    CBS_RebootInProgress               = 'N/A'
+                    WUAU_RebootRequired                = 'N/A'
+                    PendingFileRenameOperations_Exist  = 'N/A'
+                    PendingFileRenameOperations_Detail = 'N/A'
+                    RecentHotfixes                     = 'N/A'
+                    PendingComputerRename              = 'N/A'
+                    PendingDomainJoin                  = 'N/A'
+                    CCM_RebootPending_WMI              = 'N/A'
                 }
             }
         }
@@ -327,7 +353,7 @@ function Write-PendingFileOperations {
         [object[]]$Results
     )
 
-    $flagged = $Results | Where-Object { $_.PendingFileRenameOperations_Exist }
+    $flagged = $Results | Where-Object { $_.PendingFileRenameOperations_Exist -eq $true }
     if (-not $flagged) { return }
 
     foreach ($server in $flagged) {
@@ -507,7 +533,9 @@ function Write-PendingRebootSummary {
         $cells = foreach ($col in $columns) {
             $value = $r.($col.Name)
             if ($col.Flag) {
-                $text = if ($value) { 'YES' } else { 'no' }
+                # Booleans render as YES/no; anything else (e.g. the 'N/A' string used
+                # for connection-error rows) is displayed verbatim.
+                $text = if ($value -is [bool]) { if ($value) { 'YES' } else { 'no' } } else { "$value" }
             }
             else {
                 $text = "$value"
@@ -516,14 +544,46 @@ function Write-PendingRebootSummary {
         }
         $rowLine = $cells -join '  '
 
-        $rowColor = if ($r.ConnectionError)            { 'Magenta' }
-                    elseif ($r.RebootPending_Overall)   { 'Red' }
-                    else                                { 'DarkGray' }
+        $rowColor = if ($r.ConnectionError)              { 'Magenta' }
+                    elseif ($r.RebootPending_Overall -eq $true) { 'Red' }
+                    else                                  { 'DarkGray' }
 
         Write-Host $rowLine -ForegroundColor $rowColor
 
         if ($r.ConnectionError) {
-            Write-Host ("   >> Connection/execution error — see warnings above." ) -ForegroundColor Magenta
+            Write-Host ("   >> Connection/execution error — see Connection Failures section below.") -ForegroundColor Magenta
+        }
+    }
+    Write-Host ""
+}
+
+
+function Write-PendingRebootConnectionFailures {
+    <#
+        Explicit, always-visible report of servers the script could not reach.
+        Deliberately uses Write-Host rather than Write-Warning: Write-Warning
+        output is not reliably captured by Start-Transcript in every host
+        (notably PowerShell ISE), which previously caused failed connections
+        to go unreported in saved transcripts even though a warning was raised.
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [object[]]$Results
+    )
+
+    $failed = $Results | Where-Object { $_.ConnectionError }
+    if (-not $failed) { return }
+
+    Write-Host ""
+    Write-Host "─────────────────────────────────────────────────────────────────" -ForegroundColor DarkGray
+    Write-Host "CONNECTION FAILURES" -ForegroundColor White
+    Write-Host "─────────────────────────────────────────────────────────────────" -ForegroundColor DarkGray
+
+    foreach ($f in $failed) {
+        Write-Host ""
+        Write-Host "[$($f.ComputerName)] Could not connect / execute after retries." -ForegroundColor Magenta
+        if ($f.ConnectionErrorMessage) {
+            Write-Host "   Error: $($f.ConnectionErrorMessage)" -ForegroundColor DarkGray
         }
     }
     Write-Host ""
@@ -564,7 +624,8 @@ function Export-PendingRebootReport {
                                      PendingComputerRename,
                                      PendingDomainJoin,
                                      CCM_RebootPending_WMI,
-                                     ConnectionError
+                                     ConnectionError,
+                                     ConnectionErrorMessage
 
     $paths = @{}
 
@@ -607,7 +668,7 @@ function Send-PendingRebootEmail {
         [string]$AttachmentPath
     )
 
-    $flaggedCount = ($Results | Where-Object { $_.RebootPending_Overall }).Count
+    $flaggedCount = ($Results | Where-Object { $_.RebootPending_Overall -eq $true }).Count
     $style = "<style>table{border-collapse:collapse;font-family:Segoe UI,Arial,sans-serif;font-size:13px;} " +
              "th,td{border:1px solid #ccc;padding:4px 8px;text-align:left;} " +
              "th{background:#333;color:#fff;} tr:nth-child(even){background:#f4f4f4;}</style>"
@@ -625,7 +686,8 @@ function Send-PendingRebootEmail {
                                      PendingComputerRename,
                                      PendingDomainJoin,
                                      CCM_RebootPending_WMI,
-                                     ConnectionError |
+                                     ConnectionError,
+                                     ConnectionErrorMessage |
         ConvertTo-Html -Head $style -Body "<h2>Pending Reboot Report</h2><p>$flaggedCount of $($Results.Count) server(s) flagged.</p>" |
         Out-String
 
@@ -699,16 +761,24 @@ $results = Test-PendingReboot -ComputerName $computerList `
                                -ConnectionTimeoutSeconds $ConnectionTimeoutSeconds
 
 if ($OnlyShowFlagged -eq 1) {
-    $results = $results | Where-Object { $_.RebootPending_Overall }
+    # Keep servers that are actually flagged, plus any that failed to connect —
+    # both need attention, whereas 'N/A' placeholder values on error rows should
+    # never be mistaken for a real "flagged" result.
+    $results = $results | Where-Object { $_.RebootPending_Overall -eq $true -or $_.ConnectionError }
 }
 
 # Definitions legend — always printed when file ops are flagged, regardless of ShowPendingFiles
-if ($results | Where-Object { $_.PendingFileRenameOperations_Exist }) {
+if ($results | Where-Object { $_.PendingFileRenameOperations_Exist -eq $true }) {
     Write-PendingRebootLegend
 }
 
 # Color-coded summary — one row per server
 Write-PendingRebootSummary -Results $results
+
+# Explicit connection-failure report — uses Write-Host (not Write-Warning) so it
+# is guaranteed to appear in Start-Transcript output regardless of host
+# (PowerShell ISE in particular does not reliably capture the warning stream).
+Write-PendingRebootConnectionFailures -Results $results
 
 # File operation result set — one block per server, Rename then Delete
 # Only shown when ShowPendingFiles = 1
