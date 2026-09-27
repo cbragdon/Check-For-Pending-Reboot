@@ -1,0 +1,13 @@
+# Generated reports (CSV/HTML) produced by Export-PendingRebootReport
+Reports/
+*.csv
+*.html
+
+# Logs
+*.log
+
+# OS/editor cruft
+Thumbs.db
+desktop.ini
+.vscode/
+*.swp
