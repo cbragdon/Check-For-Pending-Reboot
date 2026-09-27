@@ -1,5 +1,35 @@
 # Check-For-Pending-Reboot
 
+## Why this exists
+
+If you're managing more than a couple of Windows Servers, you already know the
+pain: patches get installed, but the server won't actually be "fully patched"
+until it reboots. That reboot doesn't always happen right away — and there's
+no single, obvious place to check whether one is waiting. Windows tracks
+"pending reboot" state across several different, unrelated mechanisms
+(Windows Update, the component servicing stack, in-use files queued for
+rename/delete, computer renames, domain joins, and — if you use SCCM/MECM —
+the configuration manager client). Missing any one of these means you might
+think a server is clean when it's actually still carrying an unfinished patch,
+an unapplied rename, or a stale/vulnerable file sitting on disk waiting to be
+replaced.
+
+Checking all of that by hand, one server at a time, doesn't scale. This script
+solves that by remotely checking **every server you care about, against every
+known pending-reboot indicator, in one pass**, and giving you a clear,
+color-coded answer per server instead of a pile of registry paths to
+cross-reference yourself. It also tells you *which* Windows Server version
+each machine is running (2016 through 2025), and — when it finds files queued
+for rename/delete — gives you a filtered, readable view of exactly which files
+are involved and which recently-installed hotfixes might be responsible, so
+you're not left guessing why a reboot is being requested.
+
+In short: **one script, one run, a straight answer for every server on
+whether it needs a reboot and why** — plus optional CSV/HTML reports and
+email delivery if you want to hand this off to a recurring job.
+
+## What it does
+
 A PowerShell script (`Multi_Server_Pending_Reboot_1.3.3.ps1`) that remotely checks
 one or more Windows Servers for pending-reboot conditions across every well-known
 detection vector, reports the Windows Server OS version each check ran against,
