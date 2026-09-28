@@ -14,3 +14,7 @@ desktop.ini
 
 # Local test transcripts (may contain internal hostnames)
 TestRun.txt
+
+# Local server list files (may contain internal hostnames)
+servers.txt
+server-list.txt

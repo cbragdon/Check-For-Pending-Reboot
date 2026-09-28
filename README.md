@@ -80,8 +80,8 @@ Configuration lives in the `USAGE` section at the bottom of the script:
 ```powershell
 $ShowPendingFiles         = 0        # 1 = show filtered Rename/Delete file detail table
 $OnlyShowFlagged          = 0        # 1 = only report servers with RebootPending_Overall = $true
-$ComputerListPath         = ''       # optional path to a server list file (.txt one-per-line, or .csv with ComputerName column)
-$DefaultComputerList      = @(...)   # fallback list used when $ComputerListPath is blank/missing
+$ServerNameListPath       = ''       # optional path to a server list file (.txt one-per-line, or .csv with ComputerName column)
+$ComputerName             = @(...)   # fallback list used when $ServerNameListPath is blank/missing ($ServerNameListPath and $ComputerName are mutually exclusive — only one is used per run)
 $RetryCount               = 2
 $RetryDelaySeconds        = 5
 $ConnectionTimeoutSeconds = 15
@@ -93,6 +93,25 @@ $SendEmail                = 0        # 1 = email the report (requires SmtpServer
 
 Run the script directly (`.\Multi_Server_Pending_Reboot_1.3.3.ps1`) with an account
 that has WinRM/PSRemoting rights on the target servers.
+
+### Loading the functions without running the config/execution section
+
+Dot-source the script to load every function (`Test-PendingReboot`,
+`Write-PendingRebootSummary`, etc.) into your current session without
+triggering the `USAGE` section's config/execution at the bottom — handy for
+interactive testing or calling individual functions ad hoc:
+
+```powershell
+. .\Multi_Server_Pending_Reboot_1.3.3.ps1 2>$null
+
+Test-PendingReboot -ComputerName "SERVER01", "SERVER02" | Format-List *
+```
+
+The script detects dot-sourcing (`$MyInvocation.InvocationName -eq '.'`) and
+returns immediately after the function definitions, so `$ServerNameListPath`/
+`$ComputerName` are never evaluated and the "no servers configured" guard
+won't fire. Running the file normally (`.\Multi_Server_Pending_Reboot_1.3.3.ps1`)
+is unaffected and still executes the full config/execution section.
 
 ## Requirements
 
@@ -289,6 +308,45 @@ file. For a definitive answer:
 This script surfaces the 5 most recently installed hotfixes (`RecentHotfixes`)
 as a best-effort timing correlation when file-rename operations are flagged —
 not a guaranteed match.
+
+### Why can't the script see if a SQL Server patch/CU/hotfix was installed?
+
+`RecentHotfixes` is populated via `Get-HotFix` (`Win32_QuickFixEngineering`),
+which is a Windows Update Agent inventory — it only tracks OS-level Windows
+Update patches. SQL Server CUs/hotfixes are typically applied via SQL's own
+`setup.exe`/patch bundles that update SQL's own registry/version keys rather
+than registering through Windows Update, so they never appear in
+`QuickFixEngineering` — same for most other vendor/product patches.
+
+This is a deliberate scope decision, not a technical limitation that could be
+patched in trivially:
+
+1. **Different discovery mechanism entirely.** SQL version/patch level comes
+   from querying the SQL Server instance itself (e.g.
+   `SELECT SERVERPROPERTY('ProductVersion')`, or
+   `HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\...\Setup`), not from
+   OS-level registry/WMI. That requires either a SQL connection (different
+   auth/permissions than WinRM) or parsing SQL's own install registry
+   path — a separate detection domain from "is a reboot pending."
+2. **Instance-awareness problem.** A box can have zero, one, or many SQL
+   instances (default + named instances, e.g. `SERVER08\INSTANCENAME` in the
+   config example). Correlating a pending reboot to "which instance's which
+   patch" multiplies the complexity — it's not a single flat check like
+   `Get-HotFix`.
+3. **The script's stated job is OS-level pending-reboot detection**,
+   applicable uniformly across any Windows Server regardless of what's
+   installed on it (SQL, IIS, nothing at all). Adding SQL-specific
+   attribution logic would narrow that generality and couple it to one
+   workload.
+4. **It's diagnostic bonus info, not required to answer the core question.**
+   The script already tells you a reboot is needed and why (rename/delete,
+   CBS, WUAU, etc.); naming the exact SQL CU responsible isn't part of that
+   yes/no reboot answer.
+
+So the script can still tell you **that** a reboot is pending (via the
+OS-level mechanisms any installer, SQL included, stages into), it just can't
+*name* SQL as the specific cause the way it can for a Windows Update KB. See
+the previous FAQ entry for how to confirm a SQL CU manually.
 
 ## Sources
 

@@ -760,28 +760,43 @@ function Write-PendingRebootLegend {
 
 function Get-PendingRebootComputerList {
     <#
-        Resolves the list of servers to check.
+        Resolves the list of servers to check. $Path and $DefaultList are mutually
+        exclusive — only one is ever used per run.
         - If $Path is supplied and exists, loads server names from it:
             * .csv  -> must contain a "ComputerName" column
             * any other extension -> one server name per line (blank/'#' lines ignored)
-        - Otherwise falls back to $DefaultList.
+        - If $Path is supplied but not found, warns and falls back to $DefaultList.
+        - If $Path is blank, uses $DefaultList.
+        - Throws if neither yields any servers (no placeholder is ever used).
     #>
     param(
         [string]  $Path,
         [string[]]$DefaultList
     )
 
-    if ($Path -and (Test-Path -LiteralPath $Path)) {
-        if ($Path -match '\.csv$') {
-            return (Import-Csv -Path $Path).ComputerName | Where-Object { $_ }
+    if ($Path) {
+        if (Test-Path -LiteralPath $Path) {
+            $list = if ($Path -match '\.csv$') {
+                (Import-Csv -Path $Path).ComputerName | Where-Object { $_ }
+            }
+            else {
+                Get-Content -Path $Path |
+                    Where-Object { $_.Trim() -and -not $_.Trim().StartsWith('#') } |
+                    ForEach-Object { $_.Trim() }
+            }
+            Write-Host "Using server list from `$ServerNameListPath: $Path" -ForegroundColor DarkGray
+            return $list
         }
         else {
-            return Get-Content -Path $Path |
-                Where-Object { $_.Trim() -and -not $_.Trim().StartsWith('#') } |
-                ForEach-Object { $_.Trim() }
+            Write-Warning "`$ServerNameListPath is set to '$Path' but that file was not found. Falling back to `$ComputerName."
         }
     }
 
+    if (-not $DefaultList -or $DefaultList.Count -eq 0) {
+        throw "No servers to check: `$ServerNameListPath is blank/not found and `$ComputerName is empty. Set one of the two (they are mutually exclusive) before running this script."
+    }
+
+    Write-Host "Using server list from `$ComputerName." -ForegroundColor DarkGray
     return $DefaultList
 }
 
@@ -1022,6 +1037,14 @@ function Send-PendingRebootEmail {
 # USAGE
 # =============================================================================
 
+# Dot-sourcing this file (". .\Multi_Server_Pending_Reboot_1.3.3.ps1") loads all
+# functions above without auto-running the config/execution below — handy for
+# interactive testing (e.g. calling Test-PendingReboot directly). Running the
+# file normally (".\Multi_Server_Pending_Reboot_1.3.3.ps1") still executes it.
+if ($MyInvocation.InvocationName -eq '.') {
+    return
+}
+
 # Set to 1 to display pending Rename/Delete file details per server.
 # Default is 0 — summary table only.
 $ShowPendingFiles = 0
@@ -1031,22 +1054,32 @@ $ShowPendingFiles = 0
 $OnlyShowFlagged = 0
 
 # Optional: path to a file listing servers to check — one name per line (# = comment),
-# or a CSV with a "ComputerName" column. Leave blank ('') to use $DefaultComputerList below.
-$ComputerListPath = ''
+# or a CSV with a "ComputerName" column. Leave blank ('') to use $ComputerName below.
+# If you already set $ServerNameListPath before running this script (e.g. in your
+# current session), that value is kept — it's only defaulted to '' here if unset.
+if (-not (Test-Path Variable:\ServerNameListPath)) {
+    $ServerNameListPath = ''
+}
 
-# Fallback / default server list used when $ComputerListPath is blank or not found.
-# Replace these placeholder names with your own server(s) — additional example
-# entries are left commented out to show the array format for more than one server.
-$DefaultComputerList = @(
-    "SERVER01"
-    #"SERVER02"
-    #"SERVER03"
-    #"SERVER04"
-    #"SERVER05"
-    #"SERVER06"
-    #"SERVER07"
-    #"SERVER08\INSTANCENAME"
-)
+# Fallback / default server list used when $ServerNameListPath is blank or not found.
+# $ServerNameListPath and $ComputerName are mutually exclusive — only one is
+# ever used per run (path wins if it's set and exists). Left empty (NULL) by
+# default so the script never silently runs against a placeholder name; add your
+# own server(s) here, or use $ServerNameListPath instead, before running.
+# If you already set $ComputerName before running this script (e.g. in your
+# current session), that value is kept — it's only defaulted here if unset.
+if (-not (Test-Path Variable:\ComputerName)) {
+    $ComputerName = @(
+        #"SERVER01"
+        #"SERVER02"
+        #"SERVER03"
+        #"SERVER04"
+        #"SERVER05"
+        #"SERVER06"
+        #"SERVER07"
+        #"SERVER08\INSTANCENAME"
+    )
+}
 
 # Connection resiliency
 $RetryCount               = 2
@@ -1066,7 +1099,7 @@ $EmailTo     = @()
 
 # -----------------------------------------------------------------------------
 
-$computerList = Get-PendingRebootComputerList -Path $ComputerListPath -DefaultList $DefaultComputerList
+$computerList = Get-PendingRebootComputerList -Path $ServerNameListPath -DefaultList $ComputerName
 
 $results = Test-PendingReboot -ComputerName $computerList `
                                -RetryCount $RetryCount `
