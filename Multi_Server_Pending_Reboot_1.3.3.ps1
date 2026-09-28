@@ -1035,14 +1035,14 @@ $OnlyShowFlagged = 0
 $ComputerListPath = ''
 
 # Fallback / default server list used when $ComputerListPath is blank or not found.
-# Additional known servers are left commented out — uncomment individually to include them.
+# Replace these placeholder names with your own server(s) — additional example
+# entries are left commented out to show the array format for more than one server.
 $DefaultComputerList = @(
     "SERVER01"
-    "SERVER02"
-    "SERVER03"
+    #"SERVER02"
+    #"SERVER03"
     #"SERVER04"
-    #"SERVER05a"
-    #"SERVER05b"
+    #"SERVER05"
     #"SERVER06"
     #"SERVER07"
     #"SERVER08\INSTANCENAME"
