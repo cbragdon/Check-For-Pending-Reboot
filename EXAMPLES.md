@@ -125,16 +125,29 @@ variable — was actually used.
 someone else) already maintain a server list file somewhere (any path,
 any of your own naming), and just need to tell the script where it is. Same
 mutual-exclusivity rule applies: as long as the path is valid, it's used
-instead of `$ComputerName`.
+instead of `$ComputerName`. Includes the same two safety steps as example 4:
+clearing any leftover `$ComputerName` from an earlier command in this
+session, and confirming the file actually exists with `Test-Path` before
+running — since a typo'd path fails silently by falling back to
+`$ComputerName` instead of erroring.
 
 ```powershell
 cd C:\temp\Check-For-Pending-Reboot
 
+# Clear any leftover $ComputerName from earlier testing
+Remove-Variable ComputerName -ErrorAction SilentlyContinue
+
 # Point at an existing server list file — replace with your actual path
 $ServerNameListPath = "D:\Ops\Inventory\my-servers.txt"
 
+# Confirm it actually exists before relying on it
+Test-Path $ServerNameListPath
+
 .\Multi_Server_Pending_Reboot_1.3.3.ps1
 ```
+
+Expect to see `Using server list from $ServerNameListPath: ...` in the output,
+confirming your file was used.
 
 The file just needs to follow one of the two formats below (plain text or
 CSV) — see the next section.
