@@ -51,8 +51,7 @@ Start-Transcript -Path C:\temp\Check-For-Pending-Reboot\TestRun.txt -Force
 Stop-Transcript
 ```
 
-`TestRun.txt` is git-ignored (see `.gitignore`) since transcripts capture real
-hostnames — safe to use for local testing, never committed.
+`TestRun.txt` is git-ignored (see `.gitignore`).
 
 ## 3. Use a server list file, with a transcript
 
@@ -79,8 +78,7 @@ Start-Transcript -Path C:\temp\Check-For-Pending-Reboot\TestRun.txt -Force
 Stop-Transcript
 ```
 
-`servers.txt` is also git-ignored (see `.gitignore`) — real server names used
-locally are never committed.
+`servers.txt` is also git-ignored (see `.gitignore`).
 
 ## 4. Use a server list file, console output only (with clean session state)
 
@@ -145,5 +143,4 @@ SERVER02
 SERVER03
 ```
 
-Both `servers.txt` and any `.csv` server list are git-ignored — real server
-names used locally are never committed.
+Both `servers.txt` and any `.csv` server list are git-ignored.

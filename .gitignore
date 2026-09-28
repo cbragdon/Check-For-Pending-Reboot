@@ -12,9 +12,9 @@ desktop.ini
 .vscode/
 *.swp
 
-# Local test transcripts (may contain internal hostnames)
+# Local test transcripts
 TestRun.txt
 
-# Local server list files (may contain internal hostnames)
+# Local server list files
 servers.txt
 server-list.txt
