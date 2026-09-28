@@ -11,3 +11,6 @@ Thumbs.db
 desktop.ini
 .vscode/
 *.swp
+
+# Local test transcripts (may contain internal hostnames)
+TestRun.txt

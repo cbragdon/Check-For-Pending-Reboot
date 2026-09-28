@@ -122,6 +122,63 @@
 #                         Added Write-PendingRebootActivityCheck to surface
 #                         this comparison for every flagged server. Added a
 #                         matching FAQ entry to README.md.
+#   1.8.1 - 2026-09-27 - Write-PendingRebootActivityCheck now cross-references
+#                         RecentHotfixes against LastBootUpTime when CBS.log
+#                         activity is newer than boot, listing any hotfix(es)
+#                         installed after the reboot as the likely culprit(s)
+#                         behind the fresh pending-reboot condition. Same
+#                         best-effort heuristic caveat as RecentHotfixes
+#                         elsewhere — not a guaranteed link.
+#   1.8.2 - 2026-09-27 - False-positive hardening for the activity check:
+#                         - Added CBSKeyLastWriteTime/WUAUKeyLastWriteTime
+#                           (actual RebootPending/RebootRequired registry key
+#                           timestamps via RegQueryInfoKey, not just the
+#                           CBS.log file) as corroborating signals.
+#                         - Write-PendingRebootActivityCheck now reports a
+#                           High/Medium/Low confidence level based on how many
+#                           of those signals agree, and calls out disagreement
+#                           as inconclusive instead of asserting an answer.
+#                         - Hotfix InstalledOn is often date-only; same-day
+#                           hotfixes relative to boot are now labeled
+#                           inconclusive instead of ordered as before/after.
+#                         - Explicit note added wherever RecentHotfixes is
+#                           shown that it only covers OS-level Windows Update
+#                           hotfixes, not SQL Server/third-party patches.
+#   1.8.3 - 2026-09-27 - Removed the Write-Warning calls in Test-PendingReboot
+#                         for retry attempts and final connection failure.
+#                         ConnectionErrorMessage is still captured on the
+#                         result object, and Write-PendingRebootConnectionFailures
+#                         already reports every unreachable server explicitly —
+#                         the per-attempt/final warnings were redundant console
+#                         noise on top of that.
+#   1.8.4 - 2026-09-27 - Added a minimal single-line-per-host status message
+#                         ("Connecting to X... Connected."/"Could not
+#                         connect.") so the console shows live progress
+#                         (avoiding the impression the script has hung)
+#                         without reintroducing the removed per-retry/full
+#                         WinRM error chatter.
+#   1.8.5 - 2026-09-27 - Attempted fix: redirected Invoke-Command's error
+#                         stream (2>$null) in the retry loop. Did NOT work —
+#                         under PowerShell ISE the "PS>TerminatingError(): ..."
+#                         trace for a caught -ErrorAction Stop failure is
+#                         written directly to the host, bypassing stream
+#                         redirection. Superseded by 1.8.6.
+#   1.8.6 - 2026-09-27 - Replaced -ErrorAction Stop + try/catch around
+#                         Invoke-Command with -ErrorAction SilentlyContinue +
+#                         -ErrorVariable. Since the error is no longer
+#                         terminating, ISE has nothing to trace — this is
+#                         what actually eliminates the "PS>TerminatingError()"
+#                         transcript/console chatter that 1.8.5 could not.
+#   1.8.5 - 2026-09-27 - Redirected Invoke-Command's error stream (2>$null)
+#                         in Test-PendingReboot's retry loop. Under
+#                         PowerShell ISE + Start-Transcript, a caught
+#                         -ErrorAction Stop failure was still writing a raw
+#                         "PS>TerminatingError(): ..." engine trace line to
+#                         the transcript even though the exception was
+#                         already being handled in the catch block — this
+#                         was the same kind of unwanted console/transcript
+#                         chatter the 1.8.3 Write-Warning removal targeted,
+#                         just from a different source.
 #==============================================================================
 
 function Test-PendingReboot {
@@ -149,11 +206,15 @@ function Test-PendingReboot {
             $sessionOption  = New-PSSessionOption -OpenTimeout ($ConnectionTimeoutSeconds * 1000) `
                                                     -OperationTimeout ($ConnectionTimeoutSeconds * 1000)
 
+            # Lightweight, single-line-per-host status — lets the person watching the
+            # console know the script is alive and hasn't hung, without the noisy
+            # per-retry/full-error chatter that used to print here.
+            Write-Host "Connecting to $Computer... " -NoNewline
+
             while ($attempt -lt $RetryCount -and -not $remoteStatus) {
                 $attempt++
 
-                try {
-                    $scriptBlock = {
+                $scriptBlock = {
                     $result = [PSCustomObject]@{
                         ConnectionError                     = $false
                         ConnectionErrorMessage              = $null
@@ -163,6 +224,10 @@ function Test-PendingReboot {
                         LastBootUpTime                      = $null
                         CBSLogLastWriteTime                 = $null
                         CBSLogNewerThanBoot                 = $null
+                        CBSKeyLastWriteTime                 = $null
+                        CBSKeyNewerThanBoot                 = $null
+                        WUAUKeyLastWriteTime                = $null
+                        WUAUKeyNewerThanBoot                = $null
                         CBS_RebootPending                  = $false
                         CBS_PackagesPending                = $false
                         CBS_RebootInProgress               = $false
@@ -207,6 +272,56 @@ function Test-PendingReboot {
                         $result.CBS_RebootPending = $true
                     }
 
+                    # Registry-key LastWriteTime corroboration: CBS.log's file-write time alone
+                    # can reflect benign housekeeping unrelated to a real reboot-required change,
+                    # so we also read the actual RebootPending/RebootRequired key's own last-write
+                    # timestamp (not exposed by Get-Item for the registry provider — requires
+                    # RegQueryInfoKey via P/Invoke) as a second, independent signal. Agreement
+                    # between this and CBSLogNewerThanBoot raises confidence; disagreement flags
+                    # the result as inconclusive instead of asserting one way or the other.
+                    if (-not ('PRRegistryTimestamp' -as [type])) {
+                        try {
+                            Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+using Microsoft.Win32;
+public class PRRegistryTimestamp {
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern int RegQueryInfoKey(
+        IntPtr hKey, StringBuilder lpClass, ref uint lpcbClass, IntPtr lpReserved,
+        out uint lpcSubKeys, out uint lpcbMaxSubKeyLen, out uint lpcbMaxClassLen,
+        out uint lpcValues, out uint lpcbMaxValueNameLen, out uint lpcbMaxValueLen,
+        out uint lpcbSecurityDescriptor, out long lpftLastWriteTime);
+
+    public static Nullable<DateTime> GetLastWriteTime(string subKeyPath) {
+        using (RegistryKey key = Registry.LocalMachine.OpenSubKey(subKeyPath)) {
+            if (key == null) { return null; }
+            uint lpcbClass = 0, lpcSubKeys, lpcbMaxSubKeyLen, lpcbMaxClassLen, lpcValues,
+                 lpcbMaxValueNameLen, lpcbMaxValueLen, lpcbSecurityDescriptor;
+            long lastWriteTime;
+            int hr = RegQueryInfoKey(key.Handle.DangerousGetHandle(), null, ref lpcbClass, IntPtr.Zero,
+                out lpcSubKeys, out lpcbMaxSubKeyLen, out lpcbMaxClassLen, out lpcValues,
+                out lpcbMaxValueNameLen, out lpcbMaxValueLen, out lpcbSecurityDescriptor, out lastWriteTime);
+            if (hr != 0) { return null; }
+            return DateTime.FromFileTime(lastWriteTime);
+        }
+    }
+}
+'@ -ErrorAction Stop
+                        } catch {}
+                    }
+
+                    if ($result.CBS_RebootPending) {
+                        try {
+                            $result.CBSKeyLastWriteTime = [PRRegistryTimestamp]::GetLastWriteTime(
+                                'Software\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending')
+                            if ($result.LastBootUpTime -and $result.CBSKeyLastWriteTime) {
+                                $result.CBSKeyNewerThanBoot = ($result.CBSKeyLastWriteTime -gt $result.LastBootUpTime)
+                            }
+                        } catch {}
+                    }
+
                     # Check 1b: Component Based Servicing — packages still mid-installation
                     if (Get-ChildItem "HKLM:\Software\Microsoft\Windows\CurrentVersion\Component Based Servicing\PackagesPending" -EA Ignore) {
                         $result.CBS_PackagesPending = $true
@@ -220,6 +335,13 @@ function Test-PendingReboot {
                     # Check 2: Windows Update Auto Update (WUAU)
                     if (Get-Item "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired" -EA Ignore) {
                         $result.WUAU_RebootRequired = $true
+                        try {
+                            $result.WUAUKeyLastWriteTime = [PRRegistryTimestamp]::GetLastWriteTime(
+                                'SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired')
+                            if ($result.LastBootUpTime -and $result.WUAUKeyLastWriteTime) {
+                                $result.WUAUKeyNewerThanBoot = ($result.WUAUKeyLastWriteTime -gt $result.LastBootUpTime)
+                            }
+                        } catch {}
                     }
 
                     # Check 3: PendingFileRenameOperations (Session Manager)
@@ -336,23 +458,35 @@ function Test-PendingReboot {
                     return $result
                 }
 
-                    $remoteStatus = Invoke-Command -ComputerName $Computer -ScriptBlock $scriptBlock `
-                                        -SessionOption $sessionOption -ErrorAction Stop
-                }
-                catch {
-                    $lastError = $_
+                $icError = $null
+                $remoteStatus = Invoke-Command -ComputerName $Computer -ScriptBlock $scriptBlock `
+                                    -SessionOption $sessionOption -ErrorAction SilentlyContinue -ErrorVariable icError
+
+                # Deliberately non-terminating (-ErrorAction SilentlyContinue + -ErrorVariable)
+                # rather than -ErrorAction Stop + try/catch: under PowerShell ISE, a caught
+                # terminating error from Invoke-Command still writes a raw
+                # "PS>TerminatingError(): ..." trace directly to the host/transcript,
+                # bypassing normal stream redirection (2>$null doesn't touch it). Checking
+                # $icError avoids triggering that trace in the first place.
+                if ($icError) {
+                    $lastError    = $icError[0]
+                    $remoteStatus = $null
                     if ($attempt -lt $RetryCount) {
-                        Write-Warning "Attempt $attempt/$RetryCount failed for $Computer. Retrying in $RetryDelaySeconds sec... Error: $_"
                         Start-Sleep -Seconds $RetryDelaySeconds
                     }
                 }
             }
 
             if ($remoteStatus) {
+                Write-Host "Connected." -ForegroundColor Green
                 $remoteStatus | Select-Object @{Name = 'ComputerName'; Expression = {$Computer}}, *
             }
             else {
-                Write-Warning "Could not connect to $Computer or remote execution failed after $RetryCount attempt(s). Error: $lastError"
+                Write-Host "Could not connect." -ForegroundColor Red
+                # No Write-Warning here by design: the summary table / CONNECTION FAILURES
+                # section (Write-PendingRebootConnectionFailures) already reports every
+                # unreachable server, including this same error message, via ConnectionErrorMessage
+                # below — so a console warning here would just be redundant noise.
                 [PSCustomObject]@{
                     ComputerName                       = $Computer
                     ConnectionError                    = $true
@@ -363,6 +497,10 @@ function Test-PendingReboot {
                     LastBootUpTime                      = 'N/A'
                     CBSLogLastWriteTime                 = 'N/A'
                     CBSLogNewerThanBoot                 = 'N/A'
+                    CBSKeyLastWriteTime                 = 'N/A'
+                    CBSKeyNewerThanBoot                 = 'N/A'
+                    WUAUKeyLastWriteTime                = 'N/A'
+                    WUAUKeyNewerThanBoot                = 'N/A'
                     RebootPending_Overall              = 'N/A'
                     CBS_RebootPending                  = 'N/A'
                     CBS_PackagesPending                = 'N/A'
@@ -403,7 +541,8 @@ function Write-PendingFileOperations {
         $server.PendingFileRenameOperations_Detail | Format-Table Source, Destination, Action -AutoSize
 
         if ($server.RecentHotfixes) {
-            Write-Host "   Recently installed hotfixes/CUs on this server (possible cause — not a guaranteed match):" -ForegroundColor DarkCyan
+            Write-Host "   Recently installed hotfixes/CUs on this server (possible cause — not a guaranteed match;" -ForegroundColor DarkCyan
+            Write-Host "   OS-level Windows Update hotfixes only, does not include SQL Server/third-party patches):" -ForegroundColor DarkCyan
             $server.RecentHotfixes | Format-Table HotFixID, Description, InstalledOn -AutoSize
             Write-Host "   For a definitive link, grep C:\Windows\Logs\CBS\CBS.log on $($server.ComputerName) for the file name above." -ForegroundColor DarkGray
         }
@@ -415,19 +554,29 @@ function Write-PendingRebootActivityCheck {
     <#
         For servers currently flagged with a pending reboot, compares
         C:\Windows\Logs\CBS\CBS.log's last-write time against the server's
-        last boot time (LastBootUpTime). This answers the common follow-up
-        question "why am I still seeing a pending reboot right after rebooting?":
+        last boot time (LastBootUpTime), corroborated by the actual
+        RebootPending/RebootRequired registry keys' own LastWriteTime (not
+        just the log file), to answer "why am I still seeing a pending
+        reboot right after rebooting?" with a stated confidence level rather
+        than a flat assertion:
 
-          - CBS.log activity is NEWER than the last boot -> something (Windows
-            Update/WSUS/SCCM, an agent installer, a rename/domain-join op)
-            staged a fresh pending-reboot condition *after* the reboot
-            completed. This is a new state, not a leftover — expected, not a bug.
+          - NEWER than the last boot -> something (Windows Update/WSUS/SCCM,
+            an agent installer, a rename/domain-join op) staged a fresh
+            pending-reboot condition *after* the reboot completed. This is a
+            new state, not a leftover — expected, not a bug.
 
-          - CBS.log activity is OLDER than (or equal to) the last boot -> the
-            servicing stack never actually cleared its own RebootPending state
-            during that reboot. Further reboots alone likely won't resolve it;
+          - OLDER than (or equal to) the last boot -> the servicing stack
+            never actually cleared its own RebootPending state during that
+            reboot. Further reboots alone likely won't resolve it;
             investigate with 'DISM /Online /Cleanup-Image /RestoreHealth' and
             'sfc /scannow' on the target server.
+
+        Confidence is High when all available signals (CBS.log file, CBS
+        RebootPending key, WUAU RebootRequired key) agree, Medium when only
+        one signal is available, and Low/"inconclusive" when available
+        signals disagree — in which case a manual CBS.log review on the
+        server is the recommended fallback rather than trusting either
+        conclusion.
     #>
     param(
         [Parameter(Mandatory = $true)]
@@ -447,19 +596,82 @@ function Write-PendingRebootActivityCheck {
     foreach ($server in $flagged) {
         Write-Host ""
         Write-Host "[$($server.ComputerName)]" -ForegroundColor Cyan
-        Write-Host "   Last boot time        : $($server.LastBootUpTime)" -ForegroundColor Yellow
-        Write-Host "   CBS.log last activity : $($server.CBSLogLastWriteTime)" -ForegroundColor Yellow
+        Write-Host "   Last boot time            : $($server.LastBootUpTime)" -ForegroundColor Yellow
+        Write-Host "   CBS.log last activity     : $($server.CBSLogLastWriteTime)" -ForegroundColor Yellow
+        if ($server.CBSKeyLastWriteTime -is [datetime]) {
+            Write-Host "   CBS RebootPending key     : $($server.CBSKeyLastWriteTime)" -ForegroundColor Yellow
+        }
+        if ($server.WUAUKeyLastWriteTime -is [datetime]) {
+            Write-Host "   WUAU RebootRequired key   : $($server.WUAUKeyLastWriteTime)" -ForegroundColor Yellow
+        }
+
+        # Gather every available "newer than boot" signal. Only signals that were
+        # actually captured (not $null/'N/A') count toward agreement/confidence.
+        $signals = @()
+        if ($server.CBSLogNewerThanBoot -is [bool])  { $signals += $server.CBSLogNewerThanBoot }
+        if ($server.CBSKeyNewerThanBoot -is [bool])  { $signals += $server.CBSKeyNewerThanBoot }
+        if ($server.WUAUKeyNewerThanBoot -is [bool]) { $signals += $server.WUAUKeyNewerThanBoot }
+
+        $newerCount = ($signals | Where-Object { $_ -eq $true }).Count
+        $olderCount = ($signals | Where-Object { $_ -eq $false }).Count
+        $agree      = ($newerCount -eq 0 -or $olderCount -eq 0)   # all available signals agree
+        $confidence = if ($signals.Count -le 1) { 'Medium' } elseif ($agree) { 'High' } else { 'Low' }
+
+        if (-not $agree) {
+            Write-Host "   >> Signals DISAGREE ($newerCount newer / $olderCount older than boot) —" -ForegroundColor Magenta
+            Write-Host "      inconclusive. Don't trust either conclusion below; manually review" -ForegroundColor Magenta
+            Write-Host "      C:\Windows\Logs\CBS\CBS.log on $($server.ComputerName) instead." -ForegroundColor Magenta
+            Write-Host "   Confidence: $confidence" -ForegroundColor Magenta
+            continue
+        }
 
         if ($server.CBSLogNewerThanBoot) {
-            Write-Host "   >> CBS.log activity is NEWER than the last boot — this looks like a" -ForegroundColor DarkYellow
-            Write-Host "      fresh pending-reboot condition staged after the reboot completed" -ForegroundColor DarkYellow
+            Write-Host "   >> Activity is NEWER than the last boot — this looks like a fresh" -ForegroundColor DarkYellow
+            Write-Host "      pending-reboot condition staged after the reboot completed" -ForegroundColor DarkYellow
             Write-Host "      (new update/agent/rename op), not a leftover from before it." -ForegroundColor DarkYellow
+            Write-Host "   Confidence: $confidence ($($signals.Count) signal(s) checked)" -ForegroundColor DarkYellow
+
+            # Best-effort: name the likely culprit(s) by cross-referencing RecentHotfixes
+            # (captured earlier, see Check 1) against LastBootUpTime. Caveats:
+            #  - Get-HotFix only sees OS-level Windows Update hotfixes — it will NOT show
+            #    SQL Server, IIS, or other third-party product patches, so an empty/absent
+            #    list here does not mean nothing was installed after the reboot.
+            #  - InstalledOn is frequently DATE-ONLY (midnight, no time-of-day). A hotfix
+            #    installed the same calendar day as the boot can't be reliably ordered
+            #    against it, so those are called out separately as inconclusive rather
+            #    than asserted as before/after.
+            if ($server.RecentHotfixes -and $server.RecentHotfixes -ne 'N/A') {
+                $sameDay = $server.RecentHotfixes | Where-Object {
+                    $_.InstalledOn -and $server.LastBootUpTime -is [datetime] -and
+                    $_.InstalledOn.Date -eq $server.LastBootUpTime.Date
+                }
+                $postBootHotfixes = $server.RecentHotfixes | Where-Object {
+                    $_.InstalledOn -and $server.LastBootUpTime -is [datetime] -and
+                    $_.InstalledOn.Date -gt $server.LastBootUpTime.Date
+                }
+                if ($postBootHotfixes) {
+                    Write-Host "      Likely candidate(s) — hotfix(es) installed after the last boot:" -ForegroundColor DarkYellow
+                    $postBootHotfixes | ForEach-Object {
+                        Write-Host "        - $($_.HotFixID)  $($_.Description)  (InstalledOn: $($_.InstalledOn))" -ForegroundColor DarkYellow
+                    }
+                }
+                if ($sameDay) {
+                    Write-Host "      Same-day (inconclusive — InstalledOn is date-only, so before/after" -ForegroundColor DarkGray
+                    Write-Host "      the boot can't be determined) hotfix(es):" -ForegroundColor DarkGray
+                    $sameDay | ForEach-Object {
+                        Write-Host "        - $($_.HotFixID)  $($_.Description)  (InstalledOn: $($_.InstalledOn))" -ForegroundColor DarkGray
+                    }
+                }
+            }
+            Write-Host "      Note: candidate list only covers OS-level Windows Update hotfixes —" -ForegroundColor DarkGray
+            Write-Host "      SQL Server/third-party patches won't appear here even if responsible." -ForegroundColor DarkGray
         }
         else {
-            Write-Host "   >> CBS.log activity PREDATES the last boot — the servicing stack" -ForegroundColor Red
-            Write-Host "      never actually cleared its RebootPending state. Another reboot" -ForegroundColor Red
-            Write-Host "      alone likely won't resolve this — investigate with" -ForegroundColor Red
+            Write-Host "   >> Activity PREDATES the last boot — the servicing stack never" -ForegroundColor Red
+            Write-Host "      actually cleared its RebootPending state. Another reboot alone" -ForegroundColor Red
+            Write-Host "      likely won't resolve this — investigate with" -ForegroundColor Red
             Write-Host "      'DISM /Online /Cleanup-Image /RestoreHealth' and 'sfc /scannow'." -ForegroundColor Red
+            Write-Host "   Confidence: $confidence ($($signals.Count) signal(s) checked)" -ForegroundColor Red
         }
     }
     Write-Host ""
@@ -707,6 +919,8 @@ function Export-PendingRebootReport {
                                      LastBootUpTime,
                                      CBSLogLastWriteTime,
                                      CBSLogNewerThanBoot,
+                                     CBSKeyNewerThanBoot,
+                                     WUAUKeyNewerThanBoot,
                                      RebootPending_Overall,
                                      CBS_RebootPending,
                                      CBS_PackagesPending,
@@ -772,6 +986,8 @@ function Send-PendingRebootEmail {
                                      LastBootUpTime,
                                      CBSLogLastWriteTime,
                                      CBSLogNewerThanBoot,
+                                     CBSKeyNewerThanBoot,
+                                     WUAUKeyNewerThanBoot,
                                      RebootPending_Overall,
                                      CBS_RebootPending,
                                      CBS_PackagesPending,
@@ -822,6 +1038,8 @@ $ComputerListPath = ''
 # Additional known servers are left commented out — uncomment individually to include them.
 $DefaultComputerList = @(
     "SERVER01"
+    "SERVER02"
+    "SERVER03"
     #"SERVER04"
     #"SERVER05a"
     #"SERVER05b"

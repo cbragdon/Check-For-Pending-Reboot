@@ -138,6 +138,29 @@ entries tied to different KBs per `RecentHotfixes`), you almost always only
 need to reboot the server **once** to clear all of them — you don't need to
 reboot once per detected vector or once per pending hotfix.
 
+### What if there's a mixture of Windows updates, SQL Server patches, and other products?
+
+**Same answer: one clean reboot generally clears all of it.** Windows
+Update, SQL Server setup, and most other MSI/MSP-based installers all funnel
+their reboot requirement through the same OS-level mechanisms this script
+already checks — `PendingFileRenameOperations`, the CBS `RebootPending` key,
+and the WUAU `RebootRequired` key. It doesn't matter which product staged an
+entry into that queue; a single reboot processes the whole queue regardless
+of source.
+
+**Exceptions worth knowing about:**
+- **A failed or incomplete install** (e.g., SQL Server setup errored
+  mid-patch) can leave stale/orphaned entries that survive the reboot —
+  that's a genuine "still pending" problem, not just normal queued work. See
+  the next FAQ entry for how to tell the difference.
+- **Clustered SQL Server (AlwaysOn Availability Groups / FCI)** sometimes
+  requires node-by-node reboots in sequence rather than one shared reboot,
+  since only one node can be down at a time without impacting availability.
+- If **new patches get staged during or right after the reboot** (an agent
+  auto-install, SCCM re-triggering a install cycle at startup, etc.), that's
+  a legitimately *new* pending state showing up — not the old one failing to
+  clear.
+
 ### Why does the server still show a pending reboot right after I already rebooted it?
 
 This almost always means one of two very different things happened, and
@@ -157,16 +180,44 @@ telling them apart matters:
    servicing operation. Rebooting again won't fix this on its own — it needs
    `DISM /Online /Cleanup-Image /RestoreHealth` followed by `sfc /scannow`.
 
-**The script checks this for you.** Every result now includes `LastBootUpTime`
-(from `Win32_OperatingSystem`) and `CBSLogLastWriteTime` (the last-write
-timestamp of `C:\Windows\Logs\CBS\CBS.log`). For any server still flagged with
-`RebootPending_Overall = True`, `Write-PendingRebootActivityCheck` compares the
-two and tells you which situation you're in:
+**The script checks this for you, with corroboration to avoid false positives.**
+Every result includes `LastBootUpTime` (from `Win32_OperatingSystem`) plus
+three independent "was this touched after the boot?" signals:
+`CBSLogLastWriteTime` (the CBS.log file itself), `CBSKeyLastWriteTime` (the
+actual `...\Component Based Servicing\RebootPending` registry key's own
+last-write time, read via `RegQueryInfoKey` — not just the log file, which
+can be touched by unrelated housekeeping), and `WUAUKeyLastWriteTime` (the
+WUAU `RebootRequired` key's last-write time). For any server still flagged
+with `RebootPending_Overall = True`, `Write-PendingRebootActivityCheck`
+compares all available signals against `LastBootUpTime` and reports:
 
-- **CBS.log activity is newer than the last boot** → new post-reboot activity
-  (case 1 above) — expected, not a bug. Reboot again once it settles.
-- **CBS.log activity predates the last boot** → stale/leftover state (case 2
-  above) — a reboot alone won't fix it; run DISM/SFC on that server.
+- **All available signals agree "newer than boot"** → new post-reboot
+  activity (case 1 above), reported at **High** confidence if 2+ signals
+  agree, **Medium** if only one signal was available. Expected, not a bug —
+  reboot again once it settles.
+- **All available signals agree "predates boot"** → stale/leftover state
+  (case 2 above), same High/Medium confidence rule — a reboot alone won't
+  fix it; run DISM/SFC on that server.
+- **Signals disagree** → reported as **Low confidence / inconclusive**. Don't
+  trust either conclusion — manually review `CBS.log` on that server instead.
+
+**Naming the likely culprit — carefully.** When it's case 1, the script also
+cross-references `RecentHotfixes` against `LastBootUpTime` and lists any
+hotfix(es) installed after the reboot right under that server's entry (e.g.
+"Likely candidate(s): KB5031234 ... (InstalledOn: ...)"). Two important
+caveats are called out directly in the output:
+
+- **Date-only granularity:** `InstalledOn` is frequently date-only (no
+  time-of-day). A hotfix installed the *same calendar day* as the boot can't
+  be reliably ordered against it, so those are listed separately as
+  **"same-day (inconclusive)"** rather than being asserted as before/after.
+- **Incomplete source:** `Get-HotFix` only sees OS-level Windows Update
+  hotfixes — it will **not** show SQL Server, IIS, or other third-party
+  product patches. An empty candidate list does not mean nothing was
+  installed after the reboot; it just means nothing *Windows-Update-tracked*
+  was. If `RecentHotfixes` wasn't populated at all for that server (it's only
+  captured alongside the `PendingFileRenameOperations` check), no candidate
+  list is shown and a manual CBS.log review is the fallback.
 
 ### Does a file marked for deletion affect system behavior before the reboot?
 
