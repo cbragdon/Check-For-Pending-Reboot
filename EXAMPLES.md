@@ -1,6 +1,6 @@
 # Examples
 
-Four working, copy-pasteable PowerShell constructs for running
+Five working, copy-pasteable PowerShell constructs for running
 `Multi_Server_Pending_Reboot_1.3.3.ps1`, each tested and confirmed working.
 Replace the placeholder server names below (`SERVER01`, `SERVER02`,
 `SERVER03`) with your own.
@@ -119,9 +119,29 @@ Expect to see `Using server list from $ServerNameListPath: ...` in the output
 (not a fallback warning), confirming the file — not a leftover session
 variable — was actually used.
 
+## 5. Point to a server list file you already created yourself
+
+**What it does:** Skips the file-creation step entirely — for when you (or
+someone else) already maintain a server list file somewhere (any path,
+any of your own naming), and just need to tell the script where it is. Same
+mutual-exclusivity rule applies: as long as the path is valid, it's used
+instead of `$ComputerName`.
+
+```powershell
+cd C:\temp\Check-For-Pending-Reboot
+
+# Point at an existing server list file — replace with your actual path
+$ServerNameListPath = "D:\Ops\Inventory\my-servers.txt"
+
+.\Multi_Server_Pending_Reboot_1.3.3.ps1
+```
+
+The file just needs to follow one of the two formats below (plain text or
+CSV) — see the next section.
+
 ## Server list file format options
 
-Applies to examples 3 and 4 above (`$ServerNameListPath`).
+Applies to examples 3, 4, and 5 above (`$ServerNameListPath`).
 
 **Plain text, one server per line** (`#` = comment, blank lines ignored):
 
